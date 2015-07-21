@@ -3,20 +3,18 @@
   "version": "0.0.0",
   "description": "",
   "main": "index.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
   "author": "Alan Shaw",
   "license": "MIT",
   "dependencies": {
     "async": "0.1.x",
-    "rimraf": "~2.1.4"
+    "unregistered--": "0.1.0"
   },
   "devDependencies": {
     "request": "~0.1.9",
-    "mocha": "0.14.x"
+    "unregistereddev--": "0.1.0"
   },
   "optionalDependencies": {
-    "through": "~2.2.6"
+    "through": "~2.2.6",
+    "unregisteredopt--": "0.1.0"
   }
 }

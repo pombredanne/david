@@ -1,6 +1,4 @@
-*.iml
-.idea
-node_modules
 *.log
-lib-cov
-tmp
+/coverage
+/node_modules
+/test/tmp

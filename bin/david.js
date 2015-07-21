@@ -1,98 +1,121 @@
 #!/usr/bin/env node
 
-var optimist = require("optimist")
-  .usage(
-    "Get latest dependency version information.\n" +
-    "Usage: $0 [command] [options...] [dependency names...]\n\n" +
-    "Command:\n" +
-    "  update, u  Update dependencies to latest STABLE versions and save to package.json"
-  )
-  .alias("g", "global")
-  .describe("g", "Consider global dependencies")
-  .alias("u", "unstable")
-  .describe("u", "Use UNSTABLE dependencies")
-  .alias("v", "version")
-  .describe("v", "Print version number and exit")
-
 var david = require("../")
-  , argv = optimist.argv
+  , clc = require("cli-color-tty")()
+  , Table = require("cli-table")
   , fs = require("fs")
   , npm = require("npm")
-  , cwd = process.cwd()
-  , packageFile = cwd + "/package.json"
-
-var blue  = "\033[34m"
-  , reset = "\033[0m"
-  , green = "\033[32m"
-  , gray = "\033[90m"
-  , yellow = "\033[33m"
+  , argv = require("minimist")(process.argv.slice(2))
+  , xtend = require("xtend")
 
 if (argv.usage || argv.help || argv.h) {
-  return optimist.showHelp()
+  return console.log(fs.readFileSync(__dirname + "/usage.txt", "utf8"))
 }
 
-if (argv.version) {
+if (argv.version || argv.v) {
   return console.log("v" + require("../package.json").version)
 }
 
 argv.update = argv._.indexOf("update") > -1 || argv._.indexOf("u") > -1
 
-function printDeps (deps, type) {
-  if (!Object.keys(deps).length) {
-    return
-  }
-  
-  type = type ? type + " " : ""
+function getNonWarnDepNames (deps) {
+  return Object.keys(deps).reduce(function (names, name) {
+    if (!deps[name].warn) {
+      names.push(name)
+    }
+    return names
+  }, [])
+}
 
-  var oneline = ["npm install"]
-  
-  if (type == "Dev ") {
-    oneline.push("--save-dev")
-  } else if (type == "Optional ") {
-    oneline.push("--save-optional")
-  } else if (type == "Global ") {
-    oneline.push("--global")
-  } else {
-    oneline.push("--save")
-  }
+/**
+ * Like printDeps, walk the list, but only print dependencies
+ * with warnings.
+ * @param {Object} deps
+ * @param {String} type
+ */
+function printWarnings (deps, type) {
+  if (!Object.keys(deps).length) return
 
-  console.log("")
-  console.log("%sOutdated %sDependencies%s", yellow, type, reset)
-  console.log("")
+  var warnings = {
+    E404: {title: "Unregistered", list: []},
+    ESCM: {title: "SCM", list: []},
+    EDEPTYPE: {title: "Non-strng dependency", list: []}
+  }
 
   for (var name in deps) {
     var dep = deps[name]
-    oneline.push(name+"@"+dep[argv.unstable ? "latest" : "stable"])
-    console.log("%s%s%s %s(package:%s %s, %slatest: %s%s%s)%s", 
-                green,
-                name,
-                reset,
 
-                gray,
-                blue,
-                dep.required,
-
-                gray,
-                blue,
-                dep[argv.unstable ? "latest" : "stable"],
-                gray,
-                reset
-               )
+    if (dep.warn) {
+      warnings[dep.warn.code].list.push([clc.magenta(name), clc.red(dep.warn.toString())])
+    }
   }
-  console.log("")
-  console.log("%s%s%s", gray, oneline.join(" "), reset)
-  console.log("")
+
+  Object.keys(warnings).forEach(function (warnType) {
+    var warnList = warnings[warnType].list
+
+    if (!warnList.length) return
+
+    var table = new Table({head: ["Name", "Message"], style: {head: ["reset"]}})
+
+    console.log(clc.underline(warnings[warnType].title + " " + (type ? type + "D" : "d") + "ependencies") + "\n")
+    warnList.forEach(function (row) { table.push(row) })
+    console.log(table.toString() + "\n")
+  })
+}
+
+function printDeps (deps, type) {
+  if (!Object.keys(deps).length) return
+
+  var oneLine = ["npm install"]
+
+  if (type === "dev") {
+    oneLine.push("--save-dev")
+  } else if (type === "optional") {
+    oneLine.push("--save-optional")
+  } else if (type === "global") {
+    oneLine.push("--global")
+  } else {
+    oneLine.push("--save")
+  }
+
+  var nonWarnDepNames = getNonWarnDepNames(deps)
+
+  if (nonWarnDepNames.length) {
+    if (type) {
+      console.log(clc.underline("%sDependencies"), type)
+    } else {
+      console.log(clc.underline("dependencies"))
+    }
+
+    var table = new Table({head: ["Name", "Package", "Latest"], style: {head: ["reset"]}})
+
+    nonWarnDepNames.forEach(function (name) {
+      var dep = deps[name]
+
+      oneLine.push(name+"@"+dep[argv.unstable ? "latest" : "stable"])
+
+      table.push([
+        clc.magenta(name),
+        clc.red(dep.required),
+        clc.green(dep[argv.unstable ? "latest" : "stable"])
+      ])
+    })
+
+    console.log("\n" + table.toString() + "\n\n" + oneLine.join(" ") + "\n")
+  }
+
+  printWarnings(deps, type)
 }
 
 // Get a list of dependency filters
 var filterList = argv._.filter(function (v) {
-  return !(v == "update" || v == "u")
+  return !(v === "update" || v === "u")
 })
 
 // Filter the passed deps (result from david) by the dependency names passed on the command line
 function filterDeps (deps) {
   if (!filterList.length) return deps
-  
+
   return Object.keys(deps).reduce(function (filteredDeps, name) {
     if (filterList.indexOf(name) !== -1) {
       filteredDeps[name] = deps[name]
@@ -102,14 +125,28 @@ function filterDeps (deps) {
 }
 
 // Get updated deps, devDeps and optionalDeps
-function getDeps (pkg, cb) {
-  david.getUpdatedDependencies(pkg, { stable: !argv.unstable }, function (er, deps) {
+function getUpdatedDeps (pkg, cb) {
+  var opts = {
+    stable: !argv.unstable,
+    loose: true,
+    error: {
+      E404: argv.error404,
+      ESCM: argv.errorSCM,
+      EDEPTYPE: argv.errorDepType
+    }
+  }
+
+  if (argv.registry) {
+    opts.npm = {registry: argv.registry}
+  }
+
+  david.getUpdatedDependencies(pkg, opts, function (er, deps) {
     if (er) return cb(er)
-    
-    david.getUpdatedDependencies(pkg, { dev: true, stable: !argv.unstable }, function (er, devDeps) {
+
+    david.getUpdatedDependencies(pkg, xtend(opts, {dev: true}), function (er, devDeps) {
       if (er) return cb(er)
-      
-      david.getUpdatedDependencies(pkg, { optional: true, stable: !argv.unstable }, function (er, optionalDeps) {
+
+      david.getUpdatedDependencies(pkg, xtend(opts, {optional: true}), function (er, optionalDeps) {
         cb(er, filterDeps(deps), filterDeps(devDeps), filterDeps(optionalDeps))
       })
     })
@@ -118,36 +155,48 @@ function getDeps (pkg, cb) {
 
 /**
  * Install the passed dependencies
- * 
+ *
  * @param {Object} deps Dependencies to install (result from david)
  * @param {Object} opts Install options
  * @param {Boolean} [opts.global] Install globally
  * @param {Boolean} [opts.save] Save installed dependencies to dependencies/devDependencies/optionalDependencies
  * @param {Boolean} [opts.dev] Provided dependencies are dev dependencies
  * @param {Boolean} [opts.optional] Provided dependencies are optional dependencies
+ * @param {String} [opts.registry] The npm registry URL to use
  * @param {Function} cb Callback
  */
 function installDeps (deps, opts, cb) {
   opts = opts || {}
-  
+
   var depNames = Object.keys(deps)
-  
+
   // Nothing to install!
   if (!depNames.length) {
     return cb(null)
   }
-  
-  npm.load({global: opts.global}, function (er) {
+
+  depNames = depNames.filter(function (depName) {
+    return !deps[depName].warn
+  })
+
+  var npmOpts = {global: opts.global}
+
+  // Avoid warning message from npm for invalid registry url
+  if (opts.registry) {
+    npmOpts.registry = opts.registry
+  }
+
+  npm.load(npmOpts, function (er) {
     if (er) return cb(er)
-    
+
     if (opts.save) {
       npm.config.set("save" + (opts.dev ? "-dev" : opts.optional ? "-optional" : ""), true)
     }
-    
+
     var installArgs = depNames.map(function (depName) {
       return depName + "@" + deps[depName][argv.unstable ? "latest" : "stable"]
     })
-    
+
     npm.commands.install(installArgs, function (er) {
       npm.config.set("save" + (opts.dev ? "-dev" : opts.optional ? "-optional" : ""), false)
       cb(er)
@@ -155,70 +204,122 @@ function installDeps (deps, opts, cb) {
   })
 }
 
-if (argv.global) {
+if (argv.global || argv.g) {
+  var opts = {global: true}
 
-  npm.load({ global: true }, function(err) {
-    if (err) throw err
-    
-    npm.commands.ls([], true, function(err, data) {
-      if (err) throw err
-      
+  // Avoid warning message from npm for invalid registry url
+  if (argv.registry) {
+    opts.registry = argv.registry
+  }
+
+  npm.load(opts, function (er) {
+    if (er) {
+      console.error("Failed to load npm", er)
+      process.exit(1)
+    }
+
+    npm.commands.ls([], true, function (er, data) {
+      if (er) {
+        console.error("Failed to list global dependencies", er)
+        process.exit(1)
+      }
+
       var pkg = {
         name: "Global Dependencies",
         dependencies: {}
       }
-      
+
       for (var key in data.dependencies) {
         pkg.dependencies[key] = data.dependencies[key].version
       }
-      
-      getDeps(pkg, function (er, deps) {
-        if (er) return console.error("Failed to get updated dependencies/devDependencies", er)
-        
+
+      getUpdatedDeps(pkg, function (er, deps) {
+        if (er) {
+          console.error("Failed to get updated dependencies/devDependencies", er)
+          process.exit(1)
+        }
+
         if (argv.update) {
-          
-          installDeps(deps, {global: true}, function (er) {
-            if (er) return console.error("Failed to update global dependencies", er)
+
+          installDeps(deps, opts, function (er) {
+            if (er) {
+              console.error("Failed to update global dependencies", er)
+              process.exit(1)
+            }
+
+            printWarnings(deps, "global")
           })
-          
+
         } else {
-          printDeps(deps, "Global")
+          printDeps(deps, "global")
         }
       })
     })
   })
-  
+
 } else {
-  
-  if (!fs.existsSync(packageFile)) {
-    return console.error("package.json does not exist")
+  var pkg
+
+  try {
+    pkg = fs.readFileSync(process.cwd() + "/package.json")
+    try {
+      pkg = JSON.parse(pkg)
+    } catch (er) {
+      console.error("Failed to parse package.json", er)
+      process.exit(1)
+    }
+  } catch (er) {
+    console.error("Failed to read package.json", er)
+    process.exit(1)
   }
-  
-  var pkg = require(cwd + "/package.json")
-  
-  getDeps(pkg, function (er, deps, devDeps, optionalDeps) {
-    if (er) return console.error("Failed to get updated dependencies/devDependencies", er)
-    
+
+  getUpdatedDeps(pkg, function (er, deps, devDeps, optionalDeps) {
+    if (er) {
+      console.error("Failed to get updated dependencies/devDependencies", er)
+      process.exit(1)
+    }
+
     if (argv.update) {
-      
-      installDeps(deps, {save: true}, function (er) {
-        if (er) return console.error("Failed to update/save dependencies", er)
-        
-        installDeps(devDeps, {save: true, dev: true}, function (er) {
-          if (er) return console.error("Failed to update/save devDependencies", er)
-          
-          installDeps(optionalDeps, {save: true, optional: true}, function (er) {
-            if (er) return console.error("Failed to update/save optionalDependencies", er)
+      var opts = {save: true, registry: argv.registry}
+
+      installDeps(deps, opts, function (er) {
+        if (er) {
+          console.error("Failed to update/save dependencies", er)
+          process.exit(1)
+        }
+
+        installDeps(devDeps, xtend(opts, {dev: true}), function (er) {
+          if (er) {
+            console.error("Failed to update/save devDependencies", er)
+            process.exit(1)
+          }
+
+          installDeps(optionalDeps, xtend(opts, {optional: true}), function (er) {
+            if (er) {
+              console.error("Failed to update/save optionalDependencies", er)
+              process.exit(1)
+            }
+
+            printWarnings(deps)
+            printWarnings(devDeps, "dev")
+            printWarnings(optionalDeps, "optional")
           })
         })
       })
-      
+
     } else {
       printDeps(deps)
-      printDeps(devDeps, "Dev")
-      printDeps(optionalDeps, "Optional")
+      printDeps(devDeps, "dev")
+      printDeps(optionalDeps, "optional")
+
+      if (getNonWarnDepNames(deps).length
+        || getNonWarnDepNames(devDeps).length 
+        || getNonWarnDepNames(optionalDeps).length) {
+        process.exit(1)
+      } else {
+        // Log feedback if all dependencies are up to date
+        console.log(clc.green("All dependencies up to date"))
+      }
     }
   })
 }
-
-
